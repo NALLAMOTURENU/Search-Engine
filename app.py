@@ -1,54 +1,71 @@
 import streamlit as st
-from langchain_groq import ChatGroq
-from langchain_community.utilities import ArxivAPIWrapper, WikipediaAPIWrapper
-from langchain_community.tools import ArxivQueryRun, WikipediaQueryRun, DuckDuckGoSearchRun
-from langchain.agents import initialize_agent, AgentType
 from langchain.callbacks import StreamlitCallbackHandler
-
-import os 
+from langchain_groq import ChatGroq
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain.tools import BaseTool, StructuredTool, Tool
+from langchain.prompts import PromptTemplate
+from langchain_community.tools import DuckDuckGoSearchRun, WikipediaQueryRun, ArxivQueryRun
+from langchain_community.utilities import WikipediaAPIWrapper, ArxivAPIWrapper
 from dotenv import load_dotenv
+import os
 
-## in-built tool 
+load_dotenv()
 
-api_wrapper_wiki = WikipediaAPIWrapper(top_k_results=1, doc_content_chars_max=250)
-wiki = WikipediaQueryRun(api_wrapper=api_wrapper_wiki)
+## in-built tool
+# api_wrapper_wiki = WikipediaAPIWrapper(top_k_results=1, doc_content_chars_max=250)
+# wiki = WikipediaQueryRun(api_wrapper=api_wrapper_wiki)
 
 api_wrapper_arxiv = ArxivAPIWrapper(top_k_results=1, doc_content_chars_max=250)
 arxiv = ArxivQueryRun(api_wrapper=api_wrapper_arxiv)
 
-search = DuckDuckGoSearchRun(name = "Search")
+search = DuckDuckGoSearchRun()
+
+llm = ChatGroq(model_name="llama3-8b-8192", temperature=0, streaming=True, callbacks=[StreamlitCallbackHandler()])
+
+tools = [search, arxiv]  # Removed wiki from tools list
+
+# Prompt template
+prompt = PromptTemplate.from_template("""
+Answer the following questions as best you can. You have access to the following tools:
+
+{tools}
+
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+Begin!
+
+Question: {input}
+Thought: {agent_scratchpad}
+""")
+
+# Agent executor
+agent = create_react_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
 
 st.title("Langchain - Chat with Search")
 
-"""
-in this example, we are using "StreamlitCallbackHandler" to diaply the thoughts and actions of an agent in an interactive platform..
-"""
-
-## Sidebar 
-st.sidebar.title("Settings")
-api_key = st.sidebar.text_input("Enter your groq key:",type = "password")
-
 if "messages" not in st.session_state:
-    st.session_state["messages"] = [
-        {"role": "assistant", "content":"Hi, I am a chatbot who can search the web. How can i help you?"}
-    ]
+    st.session_state.messages = []
 
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg['content'])
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-
-if prompt:= st.chat_input(placeholder="What is machine Learning?"):
-    st.session_state.messages.append({"role":"user", "content":prompt})
-    st.chat_message("user").write(prompt)
-
-    llm = ChatGroq(groq_api_key = api_key, model = "Llama3-8B-8192", streaming=True)
-    tools = [search,arxiv,wiki]
-
-    search_agent = initialize_agent(tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, handling_parsing_errors = True)
-
+if prompt := st.chat_input("What is up?"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        st_cb = StreamlitCallbackHandler(st.container(), expand_new_thoughts=False)
-        response = search_agent.run(st.session_state.messages, callbacks=[st_cb])
-        st.session_state.messages.append({"role":"assistant", "content":response})
-        st.write(response)
+        response = agent_executor.invoke({"input": prompt, "agent_scratchpad": ""})
+        st.markdown(response['output'])
+    st.session_state.messages.append({"role": "assistant", "content": response['output']})
